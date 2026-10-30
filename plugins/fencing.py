@@ -17,7 +17,7 @@ TOLERANCE = 1000
 FILL_SLACK = 0.95
 DISTANCE_STEPS = 10
 SHARP_TURN = math.radians(10)
-SMOOTHING = 2
+SMOOTHING = 0.25
 CORNER = math.radians(30)
 FACING = math.cos(math.radians(80))
 GROUP_NAME = "Via Fencing"
@@ -118,9 +118,11 @@ class Fencing:
 
     def fence_outline(self, component):
         # Increase the copper by the full distance. The extra MAX_ERROR moves the chords of the round corners out to the full distance.
-        # Then increase and decrease the outline by the same value. This fills the steps between a wide pad and a narrow track.
+        # Then increase and decrease the outline by the same value. This rounds the inside corners a little.
+        # The value is small. A larger value fills the pockets of a structure (for example between a feed and a Wilkinson ring),
+        # and then the pocket gets no vias.
         # Each component gets its own outline. Because of this, the outlines of two near tracks do not join.
-        smoothing = self.pitch * SMOOTHING
+        smoothing = round(self.pitch * SMOOTHING)
         outline = pcbnew.SHAPE_POLY_SET(component)
         outline.Inflate(self.distance + self.radius + MAX_ERROR + smoothing, pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, MAX_ERROR)
         outline.Inflate(-smoothing, pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, MAX_ERROR)
