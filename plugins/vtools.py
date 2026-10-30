@@ -5,6 +5,7 @@ import pcbnew
 import wx
 
 from .fencing import generate_fencing, selected_copper
+from .stitching import generate_stitching, selected_zones
 from .settings import load_settings, save_settings
 
 ICON_PATH = os.path.join(os.path.dirname(__file__), "assets/icon.png")
@@ -21,7 +22,7 @@ class Vtools(pcbnew.ActionPlugin):
         self.icon_file_name = ICON_PATH
 
     def Run(self):
-        # The window is modal. KiCad records an undo step only for the changes that occur before Run() returns.
+        # The window is modal. KiCad records an undo step only for the changes that occur before Run() stops.
         frame = wx.FindWindowByName("PcbFrame")
         board = pcbnew.GetBoard()
         settings = load_settings()
@@ -39,14 +40,18 @@ class Vtools(pcbnew.ActionPlugin):
             with wx.BusyCursor():
                 match choice:
                     case "Via Fencing":
-                        message = self.run_fencing(board, settings)
+                        sections = self.run_fencing(board, settings)
+                    case "Via Stitching":
+                        sections = self.run_stitching(board, settings)
                     case _:
-                        message = "Something went wrong..."
+                        sections = []
         except Exception:
             wx.MessageBox(traceback.format_exc(), "Vtools Error", wx.OK | wx.ICON_ERROR, frame)
             return
         pcbnew.Refresh()
-        wx.MessageBox(message, "Vtools", wx.OK | wx.ICON_INFORMATION, frame)
+        result_ui = ResultUI(frame, choice, sections)
+        result_ui.ShowModal()
+        result_ui.Destroy()
 
     def run_fencing(self, board, settings):
         values = settings["fencing"]
@@ -60,30 +65,97 @@ class Vtools(pcbnew.ActionPlugin):
             hole_size=values["hole_size"],
             same_net=values["same_net"],
         )
-
-        def length(mm):
-            return format_length(mm) + " mm"
-
-        lines = [
-            f"Vias placed: {result.placed + result.filled}",
-            f"    on the grid: {result.placed}",
-            f"    added around obstacles: {result.filled}",
-            f"    nearer than the Via Distance: {result.moved}",
-            f"Positions skipped: {result.skipped}",
-            "",
-            f"Via Grid: {length(values['grid'])}",
+        counts = [
+            ("Total Vias:", result.placed + result.filled),
+            ("Regular:", result.placed),
+            ("Respaced:", result.filled),
+            ("Reduced Distance:", result.moved),
+            ("Skipped:", result.skipped),
         ]
-        if result.grid > values["grid"] + 1e-6:
-            lines.append(f"    The vias cannot be nearer. Vtools used a Via Grid of {length(result.grid)}.")
-        lines.append(f"Via Distance: {length(values['distance'])}")
+        used = [("Via Grid:", grid_text(values["grid"], result.grid)), ("Default Via Distance:", length_text(values["distance"]))]
         if values["use_min_distance"]:
-            lines.append(f"Via Min Distance: {length(values['min_distance'])}")
-        lines += [
-            f"Net: {values['net']}",
-            f"Via Hole: {length(values['hole_size'])}, Via Diameter: {length(values['diameter'])}",
+            used.append(("Via Min Distance:", length_text(values["min_distance"])))
+        used.append(("Allow Smaller Distance:", "Yes" if values["use_min_distance"] else "No"))
+        used += via_rows(values)
+        return [("Result", counts), ("Settings", used)]
+
+    def run_stitching(self, board, settings):
+        values = settings["stitching"]
+        result = generate_stitching(
+            board, selected_zones(board),
+            net=values["net"],
+            grid=values["grid"],
+            clearance=values["clearance"],
+            min_clearance=values["min_clearance"],
+            diameter=values["diameter"],
+            hole_size=values["hole_size"],
+            same_net=values["same_net"],
+        )
+        counts = [
+            ("Total Vias:", result.placed + result.nudged),
+            ("Regular:", result.placed),
+            ("Respaced:", result.nudged),
+            ("Reduced Clearance:", result.reduced),
+            ("Skipped:", result.skipped),
+            ("Zones Filled Again:", "Yes"),
         ]
-        lines.append(f"Same Net Overlap: {'yes' if values['same_net'] else 'no'}")
-        return "\n".join(lines)
+        used = [
+            ("Via Grid:", grid_text(values["grid"], result.grid)),
+            ("Default Via Clearance:", length_text(values["clearance"])),
+            ("Min Via Clearance:", length_text(values["min_clearance"])),
+        ] + via_rows(values)
+        return [("Result", counts), ("Settings", used)]
+
+
+class ResultUI(wx.Dialog):
+    # This window shows the result of one run. Each section is a box of (label, value) rows.
+
+    def __init__(self, frame, title, sections):
+        super().__init__(parent=frame, title="Vtools", style=wx.DEFAULT_DIALOG_STYLE)
+        self.SetIcon(wx.Icon(ICON_PATH, wx.BITMAP_TYPE_PNG))
+        panel = wx.Panel(self)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+
+        heading = wx.StaticText(panel, label=f"{title} is done.")
+        heading.SetFont(heading.GetFont().Bold())
+        vbox.Add(heading, flag=wx.ALL | wx.CENTER, border=10)
+
+        for name, rows in sections:
+            box, parent = add_box(panel, vbox, name)
+            grid = wx.FlexGridSizer(cols=2, vgap=4, hgap=20)
+            grid.AddGrowableCol(1)
+            for label, value in rows:
+                grid.Add(wx.StaticText(parent, label=label), flag=wx.ALIGN_CENTER_VERTICAL)
+                grid.Add(wx.StaticText(parent, label=str(value)), flag=wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
+            box.Add(grid, flag=wx.EXPAND | wx.ALL, border=8)
+
+        ok_btn = wx.Button(panel, wx.ID_OK, label="OK")
+        ok_btn.SetDefault()
+        vbox.Add(ok_btn, flag=wx.ALL | wx.CENTER, border=10)
+
+        panel.SetSizer(vbox)
+        vbox.Fit(self)
+        self.CentreOnParent()
+
+
+def length_text(mm):
+    return format_length(mm) + " mm"
+
+
+def grid_text(wanted, used):
+    # If the vias cannot be as near as the Via Grid, show the grid that Vtools used.
+    if used > wanted + 1e-6:
+        return f"{length_text(used)} (min for this via)"
+    return length_text(wanted)
+
+
+def via_rows(values):
+    return [
+        ("Net:", values["net"]),
+        ("Via Hole:", length_text(values["hole_size"])),
+        ("Via Diameter:", length_text(values["diameter"])),
+        ("Same Net Overlap:", "Yes" if values["same_net"] else "No"),
+    ]
 
 
 class VtoolsUI(wx.Dialog):
@@ -93,13 +165,6 @@ class VtoolsUI(wx.Dialog):
         self.board = board
         self.settings = settings
         self.SetIcon(wx.Icon(ICON_PATH, wx.BITMAP_TYPE_PNG))
-
-        fencing = settings["fencing"]
-        design = board.GetDesignSettings()
-        if fencing["diameter"] is None:
-            fencing["diameter"] = pcbnew.ToMM(design.GetCurrentViaSize())
-        if fencing["hole_size"] is None:
-            fencing["hole_size"] = pcbnew.ToMM(design.GetCurrentViaDrill())
 
         self.panel = wx.Panel(self)
         vbox = wx.BoxSizer(wx.VERTICAL)
@@ -133,48 +198,62 @@ class VtoolsUI(wx.Dialog):
             self.CentreOnParent()
 
     def on_choice(self, event):
+        # Keep the values that the user typed for the previous generator.
+        self.read_fields()
         self.update_fields(self.gen_choice.GetStringSelection())
 
     def update_fields(self, choice):
         self.dynamic_box.Clear(True)
         self.length_inputs = {}
+        self.use_min_distance_input = None
+        self.values_key = None
 
         match choice:
             case "Via Fencing":
+                self.values_key = "fencing"
                 values = self.settings["fencing"]
-
                 box, parent = add_box(self.panel, self.dynamic_box, "Fencing Parameters")
                 self.length_inputs["grid"] = add_field(parent, box, "Via Grid:", format_length(values["grid"]), unit="mm")
-                self.length_inputs["distance"] = add_field(parent, box, "Via Distance:", format_length(values["distance"]), unit="mm")
+                self.length_inputs["distance"] = add_field(parent, box, "Default Via Distance:", format_length(values["distance"]), unit="mm")
                 self.length_inputs["min_distance"] = add_field(parent, box, "Via Min Distance:", format_length(values["min_distance"]), unit="mm")
                 self.use_min_distance_input = add_checkbox(parent, box, "Allow Smaller Distance", default=values["use_min_distance"])
                 self.use_min_distance_input.Bind(wx.EVT_CHECKBOX, lambda event: self.update_enabled())
-
-                box, parent = add_box(self.panel, self.dynamic_box, "Via Properties")
-                # Select the saved net. If it is not on this board, select a ground net.
-                nets = net_names(self.board)
-                preferred = [values["net"], "GND"] + [net for net in nets if "GND" in net.upper()]
-                self.net_input = add_choice(parent, box, "Net:", nets, next((net for net in preferred if net in nets), None))
-                self.length_inputs["hole_size"] = add_field(parent, box, "Via Hole:", format_length(values["hole_size"]), unit="mm")
-                self.length_inputs["diameter"] = add_field(parent, box, "Via Diameter:", format_length(values["diameter"]), unit="mm")
-                self.same_net_input = add_checkbox(parent, box, "Allow Same Net Overlap", default=values["same_net"])
+                self.add_via_properties(values)
                 self.update_enabled()
             case "Via Stitching":
-                self.dynamic_box.Add(wx.StaticText(self.panel, label="Via Stitching is not available yet."), flag=wx.ALL, border=10)
+                self.values_key = "stitching"
+                values = self.settings["stitching"]
+                box, parent = add_box(self.panel, self.dynamic_box, "Stitching Parameters")
+                self.length_inputs["grid"] = add_field(parent, box, "Via Grid:", format_length(values["grid"]), unit="mm")
+                self.length_inputs["clearance"] = add_field(parent, box, "Default Via Clearance:", format_length(values["clearance"]), unit="mm")
+                self.length_inputs["min_clearance"] = add_field(parent, box, "Min Via Clearance:", format_length(values["min_clearance"]), unit="mm")
+                self.add_via_properties(values)
             case _:
                 wx.MessageBox("Something went wrong...", "Error")
 
-        self.enter_btn.Enable(choice == "Via Fencing")
         self.panel.Layout()
         self.panel.Fit()
         self.Fit()
+
+    def add_via_properties(self, values):
+        box, parent = add_box(self.panel, self.dynamic_box, "Via Properties")
+        # Select the saved net. If it is not on this board, select a ground net.
+        nets = net_names(self.board)
+        preferred = [values["net"], "GND"] + [net for net in nets if "GND" in net.upper()]
+        self.net_input = add_choice(parent, box, "Net:", nets, next((net for net in preferred if net in nets), None))
+        self.length_inputs["hole_size"] = add_field(parent, box, "Via Hole:", format_length(values["hole_size"]), unit="mm")
+        self.length_inputs["diameter"] = add_field(parent, box, "Via Diameter:", format_length(values["diameter"]), unit="mm")
+        self.same_net_input = add_checkbox(parent, box, "Allow Same Net Overlap", default=values["same_net"])
 
     def update_enabled(self):
         self.length_inputs["min_distance"].Enable(self.use_min_distance_input.GetValue())
 
     def read_fields(self):
-        # Copy the fields into the settings. Return an error message, or None if all values are correct.
-        values = self.settings["fencing"]
+        # Copy the fields into the settings of the generator that the window shows.
+        # The function gives an error message. It gives None if all values are correct.
+        if self.values_key is None:
+            return None
+        values = self.settings[self.values_key]
         lengths = {}
         for key, ctrl in self.length_inputs.items():
             try:
@@ -182,20 +261,20 @@ class VtoolsUI(wx.Dialog):
             except ValueError:
                 return f"\"{ctrl.GetValue()}\" is not a number."
         values.update(lengths)
-        values.update(
-            net=self.net_input.GetStringSelection(),
-            use_min_distance=self.use_min_distance_input.GetValue(),
-            same_net=self.same_net_input.GetValue(),
-        )
+        values.update(net=self.net_input.GetStringSelection(), same_net=self.same_net_input.GetValue())
+        if self.use_min_distance_input is not None:
+            values["use_min_distance"] = self.use_min_distance_input.GetValue()
 
         if values["diameter"] <= 0 or values["hole_size"] <= 0:
-            return "The via hole and the via diameter must be more than zero."
-        if min(values["grid"], values["distance"], values["min_distance"]) < 0:
-            return "The Via Grid and the Via Distances must not be less than zero."
+            return "The Via Hole and the Via Diameter must be more than zero."
         if values["hole_size"] >= values["diameter"]:
-            return "The via hole must be smaller than the via diameter."
-        if values["use_min_distance"] and values["min_distance"] > values["distance"]:
-            return "The Via Min Distance must not be larger than the Via Distance."
+            return "The Via Hole must be smaller than the Via Diameter."
+        if min(lengths.values()) < 0:
+            return "The lengths must not be less than zero."
+        if self.values_key == "fencing" and values["use_min_distance"] and values["min_distance"] > values["distance"]:
+            return "The Via Min Distance must not be larger than the Default Via Distance."
+        if self.values_key == "stitching" and values["min_clearance"] > values["clearance"]:
+            return "The Min Via Clearance must not be larger than the Default Via Clearance."
         if not values["net"]:
             return "The board has no nets. Add a net for the vias first."
         return None
@@ -205,11 +284,15 @@ class VtoolsUI(wx.Dialog):
         if error:
             wx.MessageBox(error, "Vtools", wx.OK | wx.ICON_WARNING, self)
             return
-        if not selected_copper(self.board):
-            wx.MessageBox("No tracks, arcs or pads are selected.\nSelect the copper to fence, then start Vtools again. Vtools keeps your settings.", "Vtools", wx.OK | wx.ICON_INFORMATION, self)
-            self.EndModal(wx.ID_CANCEL)
+        if self.values_key == "fencing" and not selected_copper(self.board):
+            missing = "No tracks, arcs or pads are selected.\nSelect the copper to fence"
+        elif self.values_key == "stitching" and not selected_zones(self.board):
+            missing = "No zones are selected.\nSelect the zones to stitch"
+        else:
+            self.EndModal(wx.ID_OK)
             return
-        self.EndModal(wx.ID_OK)
+        wx.MessageBox(missing + ", then start Vtools again.", "Vtools", wx.OK | wx.ICON_INFORMATION, self)
+        self.EndModal(wx.ID_CANCEL)
 
 
 def net_names(board):

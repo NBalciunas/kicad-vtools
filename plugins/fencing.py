@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import pcbnew
 
-# The engine merges the selected copper into one polygon. It increases the polygon by
+# The engine makes one polygon from the selected copper. It increases the polygon by
 # the distance and the via radius. Then it puts the vias on the edges of that polygon.
-# The names follow the Altium "Add Shielding to Net" dialog:
+# The names are the same as in the Altium "Add Shielding to Net" dialog:
 #   distance: from the edge of the selected copper to the edge of a via.
 #   grid: from the edge of a via to the edge of the next via.
 # All lengths in this file are in KiCad internal units (nm). Only generate_fencing() uses mm.
@@ -31,7 +31,7 @@ class FencingResult:
 
 
 def selected_copper(board):
-    # When a footprint is selected, the function uses all of its pads.
+    # When you select a footprint, the function uses all of its pads.
     items = [track for track in board.GetTracks() if track.IsSelected()]
     for footprint in board.GetFootprints():
         footprint_selected = footprint.IsSelected()
@@ -39,13 +39,19 @@ def selected_copper(board):
     return items
 
 
-def generate_fencing(board, items, net="GND", grid=0.5, distance=0.5, min_distance=None, diameter=0.6, hole_size=0.3, same_net=False):
+def generate_fencing(board, items, net="GND", grid=0.5, distance=0.5, min_distance=None, diameter=0.4, hole_size=0.2, same_net=False):
     fencing = Fencing(board, items, net, pcbnew.FromMM(grid + diameter), pcbnew.FromMM(distance), None if min_distance is None else pcbnew.FromMM(min_distance), pcbnew.FromMM(diameter), pcbnew.FromMM(hole_size), same_net)
     positions, result = fencing.plan()
     result.grid = pcbnew.ToMM(fencing.pitch) - diameter
+    add_vias(board, positions, fencing.net, diameter, hole_size, GROUP_NAME)
+    return result
 
+
+def add_vias(board, positions, net, diameter, hole_size, group_name):
+    # Put a through via at each position (nm). Put all the vias in one group.
+    # The diameter and the hole size are in mm.
     group = pcbnew.PCB_GROUP(board)
-    group.SetName(GROUP_NAME)
+    group.SetName(group_name)
     board.Add(group)
     for x, y in positions:
         via = pcbnew.PCB_VIA(board)
@@ -54,12 +60,11 @@ def generate_fencing(board, items, net="GND", grid=0.5, distance=0.5, min_distan
         via.SetPosition(pcbnew.VECTOR2I(round(x), round(y)))
         via.SetWidth(pcbnew.FromMM(diameter))
         via.SetDrill(pcbnew.FromMM(hole_size))
-        via.SetNet(fencing.net)
+        via.SetNet(net)
         # A free via keeps its net when no track connects to it.
         via.SetIsFree(True)
         board.Add(via)
         group.AddItem(via)
-    return result
 
 
 class Fencing:
@@ -70,7 +75,7 @@ class Fencing:
         self.radius = diameter // 2
         self.clearance = max(settings.m_NetSettings.GetDefaultNetclass().GetClearance(), settings.m_MinClearance)
         # The pitch is the distance between the centers of two adjacent vias (grid + diameter).
-        # Two vias cannot be nearer than the min separation. A smaller pitch changes to this value.
+        # Two vias cannot be nearer than the minimum separation. If the pitch is smaller, the engine uses the minimum separation.
         self.min_separation = max(diameter, hole_size + settings.m_HoleToHoleMin) + TOLERANCE
         self.pitch = max(pitch, self.min_separation)
         self.net = board.FindNet(net)
@@ -106,7 +111,7 @@ class Fencing:
 
     def fence_outline(self, component):
         # Increase the copper by the full distance. The extra MAX_ERROR moves the chords of the round corners out to the full distance.
-        # Then increase and decrease by the same value. This fills the steps between a wide pad and a narrow track.
+        # Then increase and decrease the outline by the same value. This fills the steps between a wide pad and a narrow track.
         # Each component gets its own outline. Because of this, the outlines of two near tracks do not join.
         smoothing = self.pitch * SMOOTHING
         outline = pcbnew.SHAPE_POLY_SET(component)
@@ -121,7 +126,7 @@ class Fencing:
 
         for walker in walkers:
             for start, length in walker.sections(self.pitch):
-                # No step is longer than the pitch, and no step is shorter than the min separation.
+                # No step is longer than the pitch. No step is shorter than the minimum separation.
                 steps = max(1, min(math.ceil(length / self.pitch - 1e-6), math.floor(length / self.min_separation)))
                 offsets = [start + length * k / steps for k in range(steps)]
                 distance, spots, own = self.best_line(walker, offsets)
@@ -130,7 +135,7 @@ class Fencing:
                 result.placed += len(spots)
                 lines.append([walker, start, length, distance, spots, own])
 
-        # Lay out again each section that lost vias to obstacles. The other sections do not change.
+        # Make a new layout for each section that has fewer vias because of obstacles. The other sections do not change.
         for line in lines:
             walker, start, length, distance, spots, own = line
             if len(spots) == own:
@@ -168,7 +173,8 @@ class Fencing:
         if not free:
             return []
 
-        # Pack from the start and from the end. Via i can go anywhere between earliest[i] and latest[i].
+        # Put the vias as near to the start as possible. Then put them as near to the end as possible.
+        # Via i can be at any position from earliest[i] to latest[i].
         earliest = [free[0][0]]
         for s, _ in free:
             if s >= earliest[-1] + self.pitch:
@@ -180,7 +186,8 @@ class Fencing:
         latest.reverse()
         vias = len(earliest)
 
-        # Aim each via at an equal step. Keep it in its range, and not nearer than the pitch to the via before it.
+        # Put each via near its position for equal steps. Keep the via in its range.
+        # Keep the via at one pitch or more from the via before it.
         chosen = []
         first, last = earliest[0], latest[-1]
         for i in range(vias):
@@ -200,7 +207,7 @@ class Fencing:
     def best_line(self, walker, offsets):
         # All vias of one section use the same distance. Because of this, the row stays straight.
         # The function uses the distance that gives the most vias. If two distances give the same number, it uses the larger distance.
-        # The function also gives the number of positions that this line owns.
+        # The function also gives the number of positions that this line has.
         best_distance, best_spots, own = self.distance, [], len(offsets)
         for distance in self.distances():
             spots = []
@@ -223,7 +230,7 @@ class Fencing:
         return best_distance, best_spots, own
 
     def spot_at(self, walker, s, distance):
-        # The function gives (x, y), or None if no via fits, or False if a different line owns this position.
+        # The function gives (x, y). It gives None if no via fits. It gives False if a different line has this position.
         (x, y), (tx, ty) = walker.at(s)
         own = self.components[walker.component]
         nx, ny = -ty, tx
@@ -231,8 +238,8 @@ class Fencing:
         if own.SquaredDistance(probe) < own.SquaredDistance(pcbnew.VECTOR2I(int(x), int(y))):
             nx, ny = -nx, -ny
 
-        # When the line of a different component is nearer than one pitch, the two lines share one row of vias.
-        # The line of the component with the lower index puts the shared vias on the middle line.
+        # When the line of a different component is nearer than one pitch, the two lines use one row of vias.
+        # The line of the component with the lower index puts this row on the middle line.
         other, other_distance = self.nearest_other(walker.component, x, y)
         if other is not None and other_distance - (self.distance + self.radius) < self.pitch:
             shared = self.middle(x, y, nx, ny, walker.component, other, other_distance)
@@ -262,8 +269,9 @@ class Fencing:
 
     def middle(self, x, y, nx, ny, index, other, other_distance):
         # Find the point on the normal that has the same distance to the two components.
-        # The function gives (x, y, distance to the copper centers' edge), or None if that point is too far from the two lines.
-        # A far point occurs where the two lines go apart, for example at the end of a track. There, each line keeps its own vias.
+        # The function gives (x, y, distance from the point to the copper). It gives None if the point is too far from the two lines.
+        # A far point occurs where the distance between the two lines increases, for example at the end of a track.
+        # At that position, each line keeps its own vias.
         t = (other_distance - (self.distance + self.radius)) / 2
         for _ in range(4):
             point = pcbnew.VECTOR2I(round(x + nx * t), round(y + ny * t))

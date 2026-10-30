@@ -9,13 +9,22 @@ SETTINGS_FILE = os.path.join(pcbnew.SETTINGS_MANAGER.GetUserSettingsPath(), "vto
 DEFAULTS = {
     "position": None,
     "fencing": {
-        "net": "GND",
-        "grid": 0.6,
+        "grid": 0.25,
         "distance": 0.5,
-        "use_min_distance": False,
         "min_distance": 0.3,
-        "diameter": None,
-        "hole_size": None,
+        "use_min_distance": False,
+        "net": "GND",
+        "hole_size": 0.2,
+        "diameter": 0.4,
+        "same_net": False,
+    },
+    "stitching": {
+        "grid": 1,
+        "clearance": 0.5,
+        "min_clearance": 0.3,
+        "net": "GND",
+        "hole_size": 0.2,
+        "diameter": 0.4,
         "same_net": False,
     },
 }
