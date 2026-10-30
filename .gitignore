@@ -1,2 +1,10 @@
+# Editors and tools
 .idea/
+.claude/settings.local.json
+
+# Python
 __pycache__/
+.venv/
+
+# Notes for the developer
+NOTES.md

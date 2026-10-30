@@ -5,27 +5,24 @@ import pcbnew
 
 SETTINGS_FILE = os.path.join(pcbnew.SETTINGS_MANAGER.GetUserSettingsPath(), "vtools.json")
 
-# All lengths are in mm. The window shows them in the selected units.
+# All lengths are in mm.
 DEFAULTS = {
-    "units": "mm",
     "position": None,
     "fencing": {
-        "via_spacing": 1.27,
-        "via_gap": 0.5,
-        "use_min_gap": False,
-        "min_gap": 0.3,
-        "via_diameter": None,
-        "via_drill": None,
-        "net_name": "GND",
-        "staggered": False,
+        "net": "GND",
+        "grid": 0.6,
+        "distance": 0.5,
+        "use_min_distance": False,
+        "min_distance": 0.3,
+        "diameter": None,
+        "hole_size": None,
         "same_net": False,
-        "fill_gaps": True,
-        "group_name": "Via Fencing",
     },
 }
 
 
 def load_settings():
+    # The function uses only the keys that are in DEFAULTS. It ignores old or unknown keys.
     settings = json.loads(json.dumps(DEFAULTS))
     try:
         with open(SETTINGS_FILE, encoding="utf-8") as file:
@@ -34,7 +31,7 @@ def load_settings():
         return settings
     for key, value in saved.items():
         if isinstance(settings.get(key), dict) and isinstance(value, dict):
-            settings[key].update(value)
+            settings[key].update({name: item for name, item in value.items() if name in settings[key]})
         elif key in settings:
             settings[key] = value
     return settings
