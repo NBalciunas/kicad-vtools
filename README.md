@@ -4,8 +4,8 @@
 
 ## Features
 
-- pb
-- pb
+- Via fencing along selected tracks, arcs and pads.
+- Via stitching inside selected zones.
 
 ## Installation
 
@@ -16,11 +16,11 @@
 
 ## Usage
 
-pb
+placeholder
 
 ## Example
 
-pb
+placeholder
 
 ## License
 

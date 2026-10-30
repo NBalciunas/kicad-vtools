@@ -18,6 +18,8 @@ FILL_SLACK = 0.95
 DISTANCE_STEPS = 10
 SHARP_TURN = math.radians(10)
 SMOOTHING = 2
+CORNER = math.radians(30)
+FACING = math.cos(math.radians(80))
 GROUP_NAME = "Via Fencing"
 
 
@@ -81,7 +83,10 @@ class Fencing:
         self.net = board.FindNet(net)
         self.copper = copper_union(items)
         # Each component is one piece of connected copper (for example one track with its pads).
-        self.components = [self.copper.UnitSet(i) for i in range(self.copper.OutlineCount())]
+        # Pieces that are too near for a via between them make one component, for example the two pads of a series capacitor.
+        # Because of this, one row of vias goes around them.
+        self.smallest = min(self.min_distance if self.min_distance is not None else distance, distance)
+        self.components = copper_groups(self.copper, self.smallest + self.radius - TOLERANCE)
 
         # The via center must stay inside this polygon.
         self.edge = pcbnew.SHAPE_POLY_SET()
@@ -108,6 +113,8 @@ class Fencing:
             self.obstacles.add((item, reach), box.GetLeft() - reach, box.GetTop() - reach, box.GetRight() + reach, box.GetBottom() + reach)
 
         self.placed = CellIndex()
+        # The positions on the middle line between two components.
+        self.shared = set()
 
     def fence_outline(self, component):
         # Increase the copper by the full distance. The extra MAX_ERROR moves the chords of the round corners out to the full distance.
@@ -130,6 +137,7 @@ class Fencing:
                 steps = max(1, min(math.ceil(length / self.pitch - 1e-6), math.floor(length / self.min_separation)))
                 offsets = [start + length * k / steps for k in range(steps)]
                 distance, spots, own = self.best_line(walker, offsets)
+                spots = self.even_shared(spots)
                 for x, y in spots:
                     self.commit(x, y)
                 result.placed += len(spots)
@@ -204,6 +212,41 @@ class Fencing:
             spots.append(spot)
         return spots
 
+    def even_shared(self, spots):
+        # The vias on a middle line come from equal steps on the outline of one component. Where that outline bends,
+        # the steps on the middle line are not equal. The function makes the steps equal in each run of middle-line vias.
+        result, run = [], []
+        for spot in spots + [None]:
+            if spot is not None and spot in self.shared:
+                run.append(spot)
+                continue
+            result.extend(self.even_run(run))
+            run = []
+            if spot is not None:
+                result.append(spot)
+        return result
+
+    def even_run(self, spots):
+        # Put the vias at equal steps along the line through them. The first and the last via do not move.
+        # If a new position is not free, the function keeps the old vias.
+        if len(spots) < 3:
+            return spots
+        lengths = [0.0]
+        for (ax, ay), (bx, by) in zip(spots, spots[1:]):
+            lengths.append(lengths[-1] + math.hypot(bx - ax, by - ay))
+        even = [spots[0]]
+        for k in range(1, len(spots) - 1):
+            target = lengths[-1] * k / (len(spots) - 1)
+            i = min(bisect.bisect_right(lengths, target) - 1, len(spots) - 2)
+            (ax, ay), (bx, by) = spots[i], spots[i + 1]
+            t = (target - lengths[i]) / (lengths[i + 1] - lengths[i])
+            x, y = ax + (bx - ax) * t, ay + (by - ay) * t
+            if not (self.distance_ok(x, y, self.smallest) and self.free(x, y) and self.nearest_via(x, y) >= self.min_separation):
+                return spots
+            even.append((x, y))
+        even.append(spots[-1])
+        return even
+
     def best_line(self, walker, offsets):
         # All vias of one section use the same distance. Because of this, the row stays straight.
         # The function uses the distance that gives the most vias. If two distances give the same number, it uses the larger distance.
@@ -231,39 +274,60 @@ class Fencing:
 
     def spot_at(self, walker, s, distance):
         # The function gives (x, y). It gives None if no via fits. It gives False if a different line has this position.
-        (x, y), (tx, ty) = walker.at(s)
-        own = self.components[walker.component]
-        nx, ny = -ty, tx
-        probe = pcbnew.VECTOR2I(int(x + nx * 10000), int(y + ny * 10000))
-        if own.SquaredDistance(probe) < own.SquaredDistance(pcbnew.VECTOR2I(int(x), int(y))):
-            nx, ny = -nx, -ny
+        (x, y), _ = walker.at(s)
+        nx, ny = self.outward(walker.component, x, y)
 
         # When the line of a different component is nearer than one pitch, the two lines use one row of vias.
         # The line of the component with the lower index puts this row on the middle line.
-        other, other_distance = self.nearest_other(walker.component, x, y)
+        other, other_distance = self.nearest_other(walker.component, x, y, nx, ny)
         if other is not None and other_distance - (self.distance + self.radius) < self.pitch:
             shared = self.middle(x, y, nx, ny, walker.component, other, other_distance)
             if shared is not None:
                 if other < walker.component:
                     return False
-                mx, my, middle_distance = shared
-                smallest = self.min_distance if self.min_distance is not None else self.distance
-                return (mx, my) if middle_distance - self.radius >= min(smallest, self.distance) - TOLERANCE else None
+                mx, my, _ = shared
+                # Check all the copper. A third component can be nearer than the two lines.
+                if not self.distance_ok(mx, my, self.smallest):
+                    return None
+                self.shared.add((mx, my))
+                return mx, my
 
         # Move the point on the outline nearer to the copper, until the distance is correct.
         inset = self.distance - distance
         if not inset:
+            # The outline of this component can go near a different component, for example around the gap of a series capacitor.
+            need = self.distance + self.radius - TOLERANCE
+            point = pcbnew.VECTOR2I(round(x), round(y))
+            if any(component.SquaredDistance(point) < need * need for index, component in enumerate(self.components) if index != walker.component):
+                return None
             return x, y
         x, y = x - nx * inset, y - ny * inset
         return (x, y) if self.distance_ok(x, y, distance) else None
 
-    def nearest_other(self, index, x, y):
+    def outward(self, index, x, y):
+        # The direction in which the distance to the copper of this component increases fastest.
+        # At a corner of the outline, this direction is between the normals of the two edges.
+        own = self.components[index]
+        h = self.pitch / 8
+
+        def distance(px, py):
+            return math.sqrt(own.SquaredDistance(pcbnew.VECTOR2I(round(px), round(py))))
+
+        gx, gy = distance(x + h, y) - distance(x - h, y), distance(x, y + h) - distance(x, y - h)
+        size = math.hypot(gx, gy)
+        return (gx / size, gy / size) if size else (1.0, 0.0)
+
+    def nearest_other(self, index, x, y, nx, ny):
+        # Only a component in front of the line counts: the distance to it must decrease when the point moves out along the normal.
+        # A component at the end of the line does not count, for example the other pad of a series capacitor.
         point = pcbnew.VECTOR2I(round(x), round(y))
+        step = self.pitch / 4
+        ahead = pcbnew.VECTOR2I(round(x + nx * step), round(y + ny * step))
         best, best_distance = None, math.inf
         for other, component in enumerate(self.components):
             if other != index:
                 distance = math.sqrt(component.SquaredDistance(point))
-                if distance < best_distance:
+                if distance < best_distance and distance - math.sqrt(component.SquaredDistance(ahead)) > step * FACING:
                     best, best_distance = other, distance
         return best, best_distance
 
@@ -322,6 +386,18 @@ def copper_union(items):
             item.TransformShapeToPolygon(poly, layer, 0, MAX_ERROR, pcbnew.ERROR_INSIDE)
     poly.Simplify()
     return poly
+
+
+def copper_groups(copper, reach):
+    # Increase the copper by the reach. Each piece of the result gives one group: the copper inside that piece.
+    grown = pcbnew.SHAPE_POLY_SET(copper)
+    grown.Inflate(reach, pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS, MAX_ERROR)
+    groups = []
+    for i in range(grown.OutlineCount()):
+        group = pcbnew.SHAPE_POLY_SET(copper)
+        group.BooleanIntersection(grown.UnitSet(i))
+        groups.append(group)
+    return groups
 
 
 def copper_layers(item):
@@ -393,9 +469,16 @@ class Walker:
             (ax, ay), (bx, by), (cx, cy) = self.points[i - 1 if i else count - 1], self.points[i], self.points[i + 1]
             turn = abs(math.atan2((bx - ax) * (cy - by) - (by - ay) * (cx - bx), (bx - ax) * (cx - bx) + (by - ay) * (cy - by)))
             longest, shortest = max(before, after), min(before, after)
-            if turn > SHARP_TURN or (longest >= pitch and shortest < longest / 4):
+            if (turn > SHARP_TURN or (longest >= pitch and shortest < longest / 4)) and self.turn_near(self.cumulative[i], pitch) > CORNER:
                 found.append(self.cumulative[i])
         return merge_near(found, pitch / 2, self.length)
+
+    def turn_near(self, s, window):
+        # The change of direction from one window before s to one window after s.
+        # A small bump in the outline (for example a pad that is wider than its track) does not make a corner.
+        _, (ax, ay) = self.at(s - window)
+        _, (bx, by) = self.at(s + window)
+        return abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
 
     def sections(self, pitch):
         # Each section goes from one anchor to the next anchor. The function gives (start, length) for each section.
