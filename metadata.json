@@ -1,0 +1,33 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v1",
+    "name": "Vtools",
+    "description": "Via fencing and via stitching for KiCad PCBs.",
+    "description_full": "KiCad plugin for via fencing along selected tracks and via stitching inside selected zones, with configurable via size, pitch and net.",
+    "identifier": "com.github.nbalciunas.kicad-vtools",
+    "type": "plugin",
+    "author": {
+        "name": "Nojus Balčiūnas",
+        "contact": {
+            "web": "https://nbalciunas.github.io/"
+        }
+    },
+    "license": "MIT",
+    "icon": "assets/icon.png",
+    "resources": {
+        "homepage": "https://github.com/NBalciunas/kicad-vtools"
+    },
+    "tags": [
+        "rf",
+        "toolkit"
+    ],
+    "versions": [
+        {
+            "version": "1.0.0",
+            "status": "stable",
+            "kicad_version": "10.0.0",
+            "platforms": [
+                "windows"
+            ]
+        }
+    ]
+}
